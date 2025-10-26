@@ -10,7 +10,7 @@ the `frontend` directory.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -24,21 +24,31 @@ CORS(app)
 
 # Base URL for the OpenAlex API.
 OPENALEX_BASE_URL = "https://api.openalex.org"
+OPENALEX_MAILTO = "collab-finder@example.com"
 
 
 def fetch_openalex(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
     """Call the OpenAlex API and return JSON data."""
     url = f"{OPENALEX_BASE_URL}{endpoint}"
+    query_params: Dict[str, Any] = {}
+    if params:
+        query_params.update(params)
+    if "mailto" not in query_params:
+        query_params["mailto"] = OPENALEX_MAILTO
     try:
         headers = {
             "User-Agent": "CollaboratorFinder/1.0 (mailto:collab-finder@example.com)",
             "Accept": "application/json"
         }
-        response = requests.get(url, params=params, timeout=15, headers=headers)
+        response = requests.get(url, params=query_params, timeout=15, headers=headers)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
-        app.logger.error("OpenAlex request failed: %s", exc)
+        detail = getattr(exc, "response", None)
+        extra = ""
+        if detail is not None:
+            extra = f" | status={detail.status_code} body={detail.text}"
+        app.logger.error("OpenAlex request failed: %s%s", exc, extra)
         return None
 
 
@@ -52,6 +62,85 @@ def extract_institution(raw_inst: Optional[Dict]) -> Optional[Dict]:
         "type": raw_inst.get("type"),
         "country_code": raw_inst.get("country_code")
     }
+
+
+def extract_primary_institution(item: Optional[Dict[str, Any]]) -> Optional[Dict]:
+    """Return the first institution from plural/singular OpenAlex fields."""
+    if not item:
+        return None
+
+    institutions = item.get("last_known_institutions")
+    if isinstance(institutions, list) and institutions:
+        primary = institutions[0] or {}
+        return extract_institution(primary)
+
+    return extract_institution(item.get("last_known_institution"))
+
+
+def fetch_author_endpoint(endpoint: str, params: Dict[str, Any]) -> Optional[Dict]:
+    """Fetch author data with retry logic for deprecated select fields."""
+    data = fetch_openalex(endpoint, params)
+    if data is not None or "select" not in params:
+        return data
+
+    # Remove the plural field if it triggered a 403.
+    select_fields = [field.strip() for field in params.get("select", "").split(",") if field.strip()]
+    if select_fields:
+        if "last_known_institutions" in select_fields:
+            fallback_fields = [field for field in select_fields if field != "last_known_institutions"]
+            if "last_known_institution" not in fallback_fields:
+                fallback_fields.append("last_known_institution")
+            fallback_params = dict(params)
+            fallback_params["select"] = ",".join(fallback_fields)
+            data = fetch_openalex(endpoint, fallback_params)
+            if data is not None:
+                return data
+
+    # Final attempt without any select filter.
+    stripped_params = {key: value for key, value in params.items() if key != "select"}
+    return fetch_openalex(endpoint, stripped_params)
+
+
+def fetch_works_endpoint(endpoint: str, params: Dict[str, Any]) -> Optional[Dict]:
+    """Fetch works data; retry without select or with smaller page size on 403."""
+    data = fetch_openalex(endpoint, params)
+    if data is not None:
+        return data
+
+    # Remove select to avoid invalid parameter responses.
+    if "select" in params:
+        stripped = dict(params)
+        stripped.pop("select", None)
+        data = fetch_openalex(endpoint, stripped)
+        if data is not None:
+            return data
+        params = stripped
+
+    # Reduce per_page to stay within rate limits if we still fail.
+    per_page = params.get("per_page")
+    if per_page and per_page > 50:
+        reduced = dict(params)
+        reduced["per_page"] = 50
+        data = fetch_openalex(endpoint, reduced)
+        if data is not None:
+            return data
+
+    return data
+
+
+def fetch_institution_endpoint(endpoint: str, params: Dict[str, Any]) -> Optional[Dict]:
+    """Fetch institution data with a smaller page size fallback."""
+    data = fetch_openalex(endpoint, params)
+    if data is not None:
+        return data
+
+    per_page = params.get("per_page")
+    if per_page and per_page > 50:
+        reduced = dict(params)
+        reduced["per_page"] = 50
+        return fetch_openalex(endpoint, reduced)
+
+    return data
 
 
 def extract_geo(raw_geo: Optional[Dict]) -> Dict:
@@ -174,9 +263,8 @@ def search_authors():
     params = {
         "search": query,
         "per_page": min(limit, 50),
-        "select": "id,display_name,works_count,cited_by_count,last_known_institution"
     }
-    data = fetch_openalex("/authors", params)
+    data = fetch_author_endpoint("/authors", params)
     if data is None:
         authors = OFFLINE_DATA.search_authors(query, limit)
         if authors is not None:
@@ -190,7 +278,7 @@ def search_authors():
             "display_name": item.get("display_name"),
             "works_count": item.get("works_count"),
             "cited_by_count": item.get("cited_by_count"),
-            "last_known_institution": extract_institution(item.get("last_known_institution"))
+            "last_known_institution": extract_primary_institution(item)
         })
     return jsonify({"authors": authors})
 
@@ -201,11 +289,11 @@ def get_authors_by_topic(topic_id: str):
     limit = request.args.get("limit", default=50, type=int)
 
     params = {
-        "filter": f"concept.id:{topic_id}",
+        "filter": f"concepts.id:{topic_id}",
         "sort": "works_count:desc",
         "per_page": limit
     }
-    data = fetch_openalex("/authors", params)
+    data = fetch_author_endpoint("/authors", params)
     if data is None:
         authors = OFFLINE_DATA.authors_by_topic(topic_id, limit)
         if authors is not None:
@@ -219,7 +307,7 @@ def get_authors_by_topic(topic_id: str):
             "display_name": item.get("display_name"),
             "works_count": item.get("works_count"),
             "cited_by_count": item.get("cited_by_count"),
-            "last_known_institution": extract_institution(item.get("last_known_institution"))
+            "last_known_institution": extract_primary_institution(item)
         })
     return jsonify({"authors": authors})
 
@@ -227,10 +315,8 @@ def get_authors_by_topic(topic_id: str):
 @app.route("/api/author/<path:author_id>")
 def get_author_profile(author_id: str):
     """Return profile details for a single author."""
-    params = {
-        "select": "id,display_name,works_count,cited_by_count,last_known_institution"
-    }
-    data = fetch_openalex(f"/authors/{author_id}", params)
+    params: Dict[str, Any] = {}
+    data = fetch_author_endpoint(f"/authors/{author_id}", params)
     if data is None:
         author = OFFLINE_DATA.author_profile(author_id)
         if author is not None:
@@ -252,11 +338,11 @@ def get_institutions_by_topic(topic_id: str):
     """Return a list of institutions associated with a topic."""
     limit = request.args.get("limit", default=50, type=int)
     params = {
-        "filter": f"concept.id:{topic_id}",
+        "filter": f"concepts.id:{topic_id}",
         "sort": "works_count:desc",
         "per_page": limit
     }
-    data = fetch_openalex("/institutions", params)
+    data = fetch_institution_endpoint("/institutions", params)
     if data is None:
         institutions = OFFLINE_DATA.institutions_by_topic(topic_id, limit)
         if institutions is not None:
@@ -283,10 +369,9 @@ def get_coauthor_network(topic_id: str):
     limit_works = max(1, min(limit_works, 200))
     params = {
         "filter": f"concepts.id:{topic_id}",
-        "per_page": limit_works,
-        "select": "authorships.author"
+        "per_page": limit_works
     }
-    data = fetch_openalex("/works", params)
+    data = fetch_works_endpoint("/works", params)
     if data is None:
         network = OFFLINE_DATA.topic_network(topic_id)
         if network is not None:
@@ -304,10 +389,9 @@ def get_author_coauthor_network(author_id: str):
     limit_works = max(1, min(limit_works, 200))
     params = {
         "filter": f"authorships.author.id:{author_id}",
-        "per_page": limit_works,
-        "select": "authorships.author"
+        "per_page": limit_works
     }
-    data = fetch_openalex("/works", params)
+    data = fetch_works_endpoint("/works", params)
     if data is None:
         network = OFFLINE_DATA.author_network(author_id)
         if network is not None:

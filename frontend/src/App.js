@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { MapContainer, TileLayer, CircleMarker, Tooltip } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Tooltip, Polyline } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 
 const SearchModeToggle = ({ value, onChange }) => {
@@ -167,6 +167,176 @@ const InstitutionMap = ({ institutions }) => {
               <div>Works: {inst.works_count?.toLocaleString?.() ?? inst.works_count}</div>
               {inst.country_code && <div>Country: {inst.country_code}</div>}
               {inst.city && <div>{inst.city}{inst.region ? `, ${inst.region}` : ''}</div>}
+            </div>
+          </Tooltip>
+        </CircleMarker>
+      ))}
+    </MapContainer>
+  );
+};
+
+const CollaborationMap = ({ graphData, institutions, authors }) => {
+  const prepared = useMemo(() => {
+    const points = [];
+    const instById = new Map();
+
+    (institutions || []).forEach((inst) => {
+      const latitude = inst.latitude === null ? null : Number(inst.latitude);
+      const longitude = inst.longitude === null ? null : Number(inst.longitude);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return;
+      }
+      const normalized = {
+        ...inst,
+        latitude,
+        longitude
+      };
+      points.push(normalized);
+      instById.set(inst.id, normalized);
+    });
+
+    const authorInstitution = {};
+    (authors || []).forEach((author) => {
+      if (!author?.id) return;
+      const inst = author.last_known_institution || {};
+      const instId = inst.id;
+      if (!instId) return;
+      if (!instById.has(instId)) return;
+      authorInstitution[author.id] = instId;
+    });
+
+    const edges = [];
+    if (graphData?.links?.length) {
+      const aggregate = new Map();
+
+      graphData.links.forEach((link) => {
+        const sourceInstId = authorInstitution[link.source];
+        const targetInstId = authorInstitution[link.target];
+        if (!sourceInstId || !targetInstId || sourceInstId === targetInstId) {
+          return;
+        }
+
+        const sourceInst = instById.get(sourceInstId);
+        const targetInst = instById.get(targetInstId);
+        if (!sourceInst || !targetInst) return;
+
+        const key =
+          sourceInstId < targetInstId
+            ? `${sourceInstId}__${targetInstId}`
+            : `${targetInstId}__${sourceInstId}`;
+
+        if (!aggregate.has(key)) {
+          const involvesBoston =
+            (sourceInst.display_name || '').toLowerCase().includes('boston university') ||
+            (targetInst.display_name || '').toLowerCase().includes('boston university');
+
+          aggregate.set(key, {
+            key,
+            source: sourceInst,
+            target: targetInst,
+            weight: 0,
+            involvesBoston
+          });
+        }
+
+        const entry = aggregate.get(key);
+        entry.weight += link.weight || 1;
+      });
+
+      aggregate.forEach((value) => edges.push(value));
+    }
+
+    return { points, edges };
+  }, [graphData, institutions, authors]);
+
+  const { points, edges } = prepared;
+
+  if (!points.length || !edges.length) {
+    return (
+      <div
+        style={{
+          padding: 12,
+          border: '1px dashed #bbb',
+          borderRadius: 8,
+          color: '#555'
+        }}
+      >
+        Collaboration links require both author affiliations and institution coordinates.
+      </div>
+    );
+  }
+
+  const avgLat = points.reduce((acc, inst) => acc + inst.latitude, 0) / points.length;
+  const avgLng = points.reduce((acc, inst) => acc + inst.longitude, 0) / points.length;
+
+  const maxWeight = edges.reduce((max, edge) => Math.max(max, edge.weight || 0), 0);
+
+  const scaleEdgeWeight = (weight) => {
+    if (!maxWeight) return 1.5;
+    return 1.5 + (Math.log10(weight + 1) / Math.log10(maxWeight + 1)) * 3;
+  };
+
+  return (
+    <MapContainer
+      center={[avgLat, avgLng]}
+      zoom={points.length === 1 ? 4 : 2}
+      style={{ height: 420, width: '100%', borderRadius: 8 }}
+      scrollWheelZoom={false}
+    >
+      <TileLayer
+        attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+      />
+      {edges.map((edge) => {
+        const { source, target } = edge;
+        const path = [
+          [source.latitude, source.longitude],
+          [target.latitude, target.longitude]
+        ];
+        const color = edge.involvesBoston ? '#d62728' : '#6c757d';
+        const dashArray = edge.involvesBoston ? null : '8 6';
+        const weight = scaleEdgeWeight(edge.weight || 1);
+
+        return (
+          <Polyline
+            key={edge.key}
+            positions={path}
+            pathOptions={{
+              color,
+              weight,
+              dashArray,
+              opacity: edge.involvesBoston ? 0.9 : 0.7
+            }}
+          >
+            <Tooltip direction="top" sticky>
+              <div style={{ fontSize: 12 }}>
+                <div style={{ fontWeight: 600 }}>
+                  {source.display_name} ↔ {target.display_name}
+                </div>
+                <div>Co-authored works: {edge.weight}</div>
+                {edge.involvesBoston && <div style={{ color: '#d62728' }}>Includes Boston University</div>}
+              </div>
+            </Tooltip>
+          </Polyline>
+        );
+      })}
+      {points.map((inst) => (
+        <CircleMarker
+          key={inst.id}
+          center={[inst.latitude, inst.longitude]}
+          radius={6}
+          pathOptions={{
+            color: '#394867',
+            fillColor: '#90a4ae',
+            fillOpacity: 0.9,
+            weight: 1.5
+          }}
+        >
+          <Tooltip direction="top">
+            <div style={{ fontSize: 12 }}>
+              <div style={{ fontWeight: 600 }}>{inst.display_name}</div>
+              <div>Works: {inst.works_count?.toLocaleString?.() ?? inst.works_count}</div>
+              {inst.country_code && <div>Country: {inst.country_code}</div>}
             </div>
           </Tooltip>
         </CircleMarker>
@@ -610,6 +780,15 @@ function App() {
           <div style={{ marginBottom: 24 }}>
             <h3 style={{ marginBottom: 12 }}>Global Institution Footprint</h3>
             <InstitutionMap institutions={topicInstitutions} />
+          </div>
+
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ marginBottom: 12 }}>Collaboration Map</h3>
+            <CollaborationMap
+              graphData={graphData}
+              institutions={topicInstitutions}
+              authors={topicAuthors}
+            />
           </div>
 
           {!!countrySummary.length && (
