@@ -8,6 +8,7 @@ OpenAlex API so the front-end can continue functioning during demos.
 from __future__ import annotations
 
 import copy
+import statistics
 from collections import Counter
 from typing import Dict, List, Optional
 
@@ -76,6 +77,61 @@ class OfflineOpenAlexData:
                     "Dynamics of coral reef ecosystems under environmental and climate stressors."
                 ),
                 "works_count": 82000
+            }
+        ]
+
+        self._default_user_id: str = "https://openalex.org/A1969205032"
+
+        self._trending_topics_data: List[Dict] = [
+            {
+                "id": "https://openalex.org/T101",
+                "display_name": "Machine Learning",
+                "description": (
+                    "Algorithms and statistical models enabling computers to learn patterns from data."
+                ),
+                "works_count": 2450000,
+                "recent_publications": 18450,
+                "growth": 3220
+            },
+            {
+                "id": "https://openalex.org/T202",
+                "display_name": "Coral Reef Ecology",
+                "description": (
+                    "Dynamics of coral reef ecosystems under environmental and climate stressors."
+                ),
+                "works_count": 82000,
+                "recent_publications": 940,
+                "growth": 180
+            },
+            {
+                "id": "https://openalex.org/T303",
+                "display_name": "Sustainable AI",
+                "description": (
+                    "Developing energy-efficient and socially responsible artificial intelligence systems."
+                ),
+                "works_count": 120000,
+                "recent_publications": 2630,
+                "growth": 610
+            },
+            {
+                "id": "https://openalex.org/T404",
+                "display_name": "Quantum Machine Learning",
+                "description": (
+                    "Hybrid algorithms that combine quantum computing advances with modern machine learning."
+                ),
+                "works_count": 56000,
+                "recent_publications": 1910,
+                "growth": 540
+            },
+            {
+                "id": "https://openalex.org/T505",
+                "display_name": "Blue Carbon Ecosystems",
+                "description": (
+                    "Carbon sequestration dynamics in coastal ecosystems such as mangroves and seagrasses."
+                ),
+                "works_count": 21000,
+                "recent_publications": 780,
+                "growth": 210
             }
         ]
 
@@ -202,6 +258,24 @@ class OfflineOpenAlexData:
             }
         }
 
+        scientist_metrics = [
+            ("https://openalex.org/A1969205032", {"recent_publications": 28, "growth": 9}),
+            ("https://openalex.org/A2093607087", {"recent_publications": 25, "growth": 7}),
+            ("https://openalex.org/A2053681587", {"recent_publications": 22, "growth": 6}),
+            ("https://openalex.org/A1983283131", {"recent_publications": 24, "growth": 5}),
+            ("https://openalex.org/A2112779243", {"recent_publications": 18, "growth": 4}),
+            ("https://openalex.org/A2112743840", {"recent_publications": 16, "growth": 4})
+        ]
+        self._trending_scientists_data: List[Dict] = []
+        for author_id, metrics in scientist_metrics:
+            author = self._author_lookup.get(author_id)
+            if not author:
+                continue
+            author_entry = copy.deepcopy(author)
+            author_entry["recent_publications"] = metrics.get("recent_publications", 0)
+            author_entry["growth"] = metrics.get("growth", 0)
+            self._trending_scientists_data.append(author_entry)
+
         self._topic_authors: Dict[str, List[str]] = {
             "https://openalex.org/T101": [
                 "https://openalex.org/A1969205032",
@@ -290,6 +364,152 @@ class OfflineOpenAlexData:
                     "country_code": "US"
                 }
             ]
+        }
+
+        ml_work_1 = {
+            "id": "offline:W-ML-001",
+            "title": "Vision Transformers in Practice",
+            "publication_year": 2024,
+            "cited_by_count": 420,
+            "concepts": [
+                {"id": "https://openalex.org/T101", "display_name": "Machine Learning"},
+                {"id": "https://openalex.org/T501", "display_name": "Computer Vision"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1969205032", "display_name": "Fei-Fei Li"}},
+                {"author": {"id": "https://openalex.org/A2093607087", "display_name": "Andrew Ng"}},
+                {"author": {"id": "https://openalex.org/A4210001001", "display_name": "Jia Deng"}}
+            ]
+        }
+        ml_work_2 = {
+            "id": "offline:W-ML-002",
+            "title": "Scaling Reinforcement Learning Systems",
+            "publication_year": 2023,
+            "cited_by_count": 380,
+            "concepts": [
+                {"id": "https://openalex.org/T101", "display_name": "Machine Learning"},
+                {"id": "https://openalex.org/T601", "display_name": "Reinforcement Learning"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A2093607087", "display_name": "Andrew Ng"}},
+                {"author": {"id": "https://openalex.org/A2053681587", "display_name": "Geoffrey Hinton"}},
+                {"author": {"id": "https://openalex.org/A1971464923", "display_name": "Jeff Dean"}}
+            ]
+        }
+        ml_work_3 = {
+            "id": "offline:W-ML-003",
+            "title": "Generative AI for Scientific Discovery",
+            "publication_year": 2022,
+            "cited_by_count": 410,
+            "concepts": [
+                {"id": "https://openalex.org/T101", "display_name": "Machine Learning"},
+                {"id": "https://openalex.org/T701", "display_name": "Generative Models"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1983283131", "display_name": "Yoshua Bengio"}},
+                {"author": {"id": "https://openalex.org/A2053681587", "display_name": "Geoffrey Hinton"}},
+                {"author": {"id": "https://openalex.org/A1962342457", "display_name": "Yann LeCun"}}
+            ]
+        }
+        ml_work_4 = {
+            "id": "offline:W-ML-004",
+            "title": "Efficient AI Accelerators for Deep Learning",
+            "publication_year": 2021,
+            "cited_by_count": 290,
+            "concepts": [
+                {"id": "https://openalex.org/T101", "display_name": "Machine Learning"},
+                {"id": "https://openalex.org/T801", "display_name": "Hardware Acceleration"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1971464923", "display_name": "Jeff Dean"}},
+                {"author": {"id": "https://openalex.org/A1962342457", "display_name": "Yann LeCun"}}
+            ]
+        }
+        ml_work_5 = {
+            "id": "offline:W-ML-005",
+            "title": "Human-Centered AI Systems",
+            "publication_year": 2024,
+            "cited_by_count": 260,
+            "concepts": [
+                {"id": "https://openalex.org/T101", "display_name": "Machine Learning"},
+                {"id": "https://openalex.org/T901", "display_name": "Human-Computer Interaction"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1969205032", "display_name": "Fei-Fei Li"}},
+                {"author": {"id": "https://openalex.org/A4210001004", "display_name": "Olga Russakovsky"}},
+                {"author": {"id": "https://openalex.org/A4210001002", "display_name": "Justin Johnson"}}
+            ]
+        }
+        ml_work_6 = {
+            "id": "offline:W-ML-006",
+            "title": "AI for Coral Resilience Forecasting",
+            "publication_year": 2023,
+            "cited_by_count": 180,
+            "concepts": [
+                {"id": "https://openalex.org/T101", "display_name": "Machine Learning"},
+                {"id": "https://openalex.org/T202", "display_name": "Coral Reef Ecology"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A1969205032", "display_name": "Fei-Fei Li"}},
+                {"author": {"id": "https://openalex.org/A2112779243", "display_name": "Ove Hoegh-Guldberg"}}
+            ]
+        }
+        reef_work_1 = {
+            "id": "offline:W-REEF-001",
+            "title": "Coral Resilience under Climate Change",
+            "publication_year": 2024,
+            "cited_by_count": 260,
+            "concepts": [
+                {"id": "https://openalex.org/T202", "display_name": "Coral Reef Ecology"},
+                {"id": "https://openalex.org/T900", "display_name": "Climate Change"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A2112779243", "display_name": "Ove Hoegh-Guldberg"}},
+                {"author": {"id": "https://openalex.org/A2112743840", "display_name": "Terry Hughes"}},
+                {"author": {"id": "https://openalex.org/A2128745141", "display_name": "Maria Dornelas"}}
+            ]
+        }
+        reef_work_2 = {
+            "id": "offline:W-REEF-002",
+            "title": "Marine Protected Areas and Reef Recovery",
+            "publication_year": 2023,
+            "cited_by_count": 210,
+            "concepts": [
+                {"id": "https://openalex.org/T202", "display_name": "Coral Reef Ecology"},
+                {"id": "https://openalex.org/T910", "display_name": "Marine Conservation"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A2135812432", "display_name": "Enric Sala"}},
+                {"author": {"id": "https://openalex.org/A2112743840", "display_name": "Terry Hughes"}}
+            ]
+        }
+        reef_work_3 = {
+            "id": "offline:W-REEF-003",
+            "title": "Biodiversity Recovery Patterns in Coral Reefs",
+            "publication_year": 2022,
+            "cited_by_count": 195,
+            "concepts": [
+                {"id": "https://openalex.org/T202", "display_name": "Coral Reef Ecology"},
+                {"id": "https://openalex.org/T920", "display_name": "Biodiversity"}
+            ],
+            "authorships": [
+                {"author": {"id": "https://openalex.org/A2128745141", "display_name": "Maria Dornelas"}},
+                {"author": {"id": "https://openalex.org/A2112779243", "display_name": "Ove Hoegh-Guldberg"}},
+                {"author": {"id": "https://openalex.org/A2135812432", "display_name": "Enric Sala"}}
+            ]
+        }
+
+        self._author_works: Dict[str, List[Dict]] = {
+            "https://openalex.org/A1969205032": [ml_work_1, ml_work_5, ml_work_6],
+            "https://openalex.org/A2093607087": [ml_work_1, ml_work_2],
+            "https://openalex.org/A2053681587": [ml_work_2, ml_work_3],
+            "https://openalex.org/A1983283131": [ml_work_3],
+            "https://openalex.org/A1962342457": [ml_work_3, ml_work_4],
+            "https://openalex.org/A1971464923": [ml_work_2, ml_work_4],
+            "https://openalex.org/A2112779243": [reef_work_1, reef_work_3, ml_work_6],
+            "https://openalex.org/A2112743840": [reef_work_1, reef_work_2],
+            "https://openalex.org/A2135812432": [reef_work_2, reef_work_3],
+            "https://openalex.org/A2128745141": [reef_work_1, reef_work_3]
         }
 
         self._topic_networks: Dict[str, Dict] = {
@@ -392,6 +612,12 @@ class OfflineOpenAlexData:
         ]
         return _copy_slice(matches, limit)
 
+    def trending_topics(self, limit: int) -> Optional[List[Dict]]:
+        return _copy_slice(self._trending_topics_data, limit)
+
+    def trending_scientists(self, limit: int) -> Optional[List[Dict]]:
+        return _copy_slice(self._trending_scientists_data, limit)
+
     def authors_by_topic(self, topic_id: str, limit: int) -> Optional[List[Dict]]:
         author_ids = self._topic_authors.get(topic_id)
         if author_ids is None:
@@ -405,6 +631,15 @@ class OfflineOpenAlexData:
         if author is None:
             return None
         return copy.deepcopy(author)
+
+    def author_works(self, author_id: str) -> Optional[List[Dict]]:
+        works = self._author_works.get(author_id)
+        if works is None:
+            return []
+        return copy.deepcopy(works)
+
+    def default_user_id(self) -> str:
+        return self._default_user_id
 
     def institutions_by_topic(self, topic_id: str, limit: int) -> Optional[List[Dict]]:
         institutions = self._topic_institutions.get(topic_id)
