@@ -1,68 +1,155 @@
 """
 Flask backend for the Collaborator Finder web application.
 
-This backend exposes a simple REST API for searching topics and retrieving
-authors and institutions associated with a given topic using the OpenAlex API.
-The API endpoints return JSON that can be consumed by a React front‑end.
-
-Note: This code expects network access to the OpenAlex API. When running
-locally, ensure that your environment can make outbound HTTP requests.
+This backend exposes REST endpoints that wrap the OpenAlex API to provide
+topic and author search, collaborator network construction, and institution
+metadata. The endpoints are designed to be consumed by the React front-end in
+the `frontend` directory.
 """
 
-from flask import Flask, request, jsonify
+from __future__ import annotations
+
+from collections import Counter
+from typing import Dict, Iterable, List, Optional, Tuple
+
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 
+from openalex_offline import OFFLINE_DATA
+
 app = Flask(__name__)
-# Enable CORS so the React front‑end can call this API from a different port
+# Enable CORS so the React front-end can call this API from a different port.
 CORS(app)
 
-# Base URL for the OpenAlex API
+# Base URL for the OpenAlex API.
 OPENALEX_BASE_URL = "https://api.openalex.org"
 
 
-def fetch_openalex(endpoint: str, params: dict = None):
-    """Helper function to call the OpenAlex API and return JSON data.
-
-    Args:
-        endpoint: The path after the base URL, e.g. "/topics".
-        params: Query parameters for the request.
-
-    Returns:
-        The parsed JSON response from OpenAlex, or None on error.
-    """
+def fetch_openalex(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    """Call the OpenAlex API and return JSON data."""
     url = f"{OPENALEX_BASE_URL}{endpoint}"
     try:
-        response = requests.get(url, params=params, timeout=15)
+        headers = {
+            "User-Agent": "CollaboratorFinder/1.0 (mailto:collab-finder@example.com)",
+            "Accept": "application/json"
+        }
+        response = requests.get(url, params=params, timeout=15, headers=headers)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
-        app.logger.error(f"OpenAlex request failed: {exc}")
+        app.logger.error("OpenAlex request failed: %s", exc)
         return None
+
+
+def extract_institution(raw_inst: Optional[Dict]) -> Optional[Dict]:
+    """Flatten institution data returned by OpenAlex."""
+    if not raw_inst:
+        return None
+    return {
+        "id": raw_inst.get("id"),
+        "display_name": raw_inst.get("display_name"),
+        "type": raw_inst.get("type"),
+        "country_code": raw_inst.get("country_code")
+    }
+
+
+def extract_geo(raw_geo: Optional[Dict]) -> Dict:
+    """Normalize geo payloads returned by OpenAlex."""
+    raw_geo = raw_geo or {}
+    return {
+        "latitude": raw_geo.get("latitude"),
+        "longitude": raw_geo.get("longitude"),
+        "city": raw_geo.get("city"),
+        "region": raw_geo.get("region"),
+        "country_code": raw_geo.get("country_code")
+    }
+
+
+def build_coauthor_graph(
+    works: Iterable[Dict],
+    focus_author_id: Optional[str] = None
+) -> Dict:
+    """Construct a co-authorship graph from a list of works."""
+    node_map: Dict[str, int] = {}
+    nodes: List[Dict] = []
+    link_weights: Counter[Tuple[str, str]] = Counter()
+    degrees: Counter[str] = Counter()
+
+    for work in works:
+        auths = work.get("authorships", [])
+        author_ids: List[str] = []
+
+        for auth in auths:
+            author = auth.get("author") or {}
+            author_id = author.get("id")
+            if not author_id:
+                continue
+
+            if author_id not in node_map:
+                node_map[author_id] = len(nodes)
+                nodes.append({
+                    "id": author_id,
+                    "name": author.get("display_name", author_id),
+                    "is_focus": author_id == focus_author_id
+                })
+
+            author_ids.append(author_id)
+
+        # Update edge weights for every unique pair within a work.
+        for i in range(len(author_ids)):
+            for j in range(i + 1, len(author_ids)):
+                a, b = sorted((author_ids[i], author_ids[j]))
+                link_weights[(a, b)] += 1
+                degrees[a] += 1
+                degrees[b] += 1
+
+    links = [{"source": a, "target": b, "weight": weight}
+             for (a, b), weight in link_weights.items()]
+
+    for node in nodes:
+        node_id = node["id"]
+        node["degree"] = degrees.get(node_id, 0)
+
+    top_authors = sorted(nodes, key=lambda item: item.get("degree", 0), reverse=True)
+
+    return {
+        "nodes": nodes,
+        "links": links,
+        "stats": {
+            "node_count": len(nodes),
+            "link_count": len(links),
+            "top_authors": [
+                {"id": item["id"], "name": item["name"], "degree": item.get("degree", 0)}
+                for item in top_authors[:10]
+            ]
+        }
+    }
+
+
+@app.route("/api/health")
+def health_check():
+    """Return a simple status message for health checks."""
+    return jsonify({"status": "ok"})
 
 
 @app.route("/api/topics")
 def search_topics():
-    """Search for topics by name.
-
-    Query parameters:
-        q: The search string (required).
-        limit: Maximum number of topics to return (optional, default 10).
-
-    Returns:
-        A JSON list of topics with their IDs and display names.
-    """
-    query = request.args.get("q", default="", type=str).strip()
+    """Search for topics by name."""
+    query = (request.args.get("q") or request.args.get("query") or "").strip()
     limit = request.args.get("limit", default=10, type=int)
     if not query:
         return jsonify({"error": "Parameter 'q' is required"}), 400
 
     params = {
         "search": query,
-        "per_page": limit
+        "per_page": min(limit, 50)
     }
     data = fetch_openalex("/topics", params)
     if data is None:
+        topics = OFFLINE_DATA.search_topics(query, limit)
+        if topics is not None:
+            return jsonify({"topics": topics})
         return jsonify({"error": "Failed to fetch topics from OpenAlex"}), 502
 
     topics = []
@@ -76,28 +163,24 @@ def search_topics():
     return jsonify({"topics": topics})
 
 
-@app.route("/api/authors/<path:topic_id>")
-def get_authors_by_topic(topic_id: str):
-    """Return a list of authors associated with a topic.
-
-    Args:
-        topic_id: The OpenAlex ID of the topic (e.g. "https://openalex.org/T11636").
-
-    Query parameters:
-        limit: Maximum number of authors to return (optional, default 50).
-
-    Returns:
-        A JSON list of authors, sorted by works_count descending.
-    """
-    limit = request.args.get("limit", default=50, type=int)
+@app.route("/api/authors")
+def search_authors():
+    """Search for authors by name."""
+    query = (request.args.get("q") or request.args.get("query") or "").strip()
+    limit = request.args.get("limit", default=10, type=int)
+    if not query:
+        return jsonify({"error": "Parameter 'q' is required"}), 400
 
     params = {
-        "filter": f"concept.id:{topic_id}",
-        "sort": "works_count:desc",
-        "per_page": limit
+        "search": query,
+        "per_page": min(limit, 50),
+        "select": "id,display_name,works_count,cited_by_count,last_known_institution"
     }
     data = fetch_openalex("/authors", params)
     if data is None:
+        authors = OFFLINE_DATA.search_authors(query, limit)
+        if authors is not None:
+            return jsonify({"authors": authors})
         return jsonify({"error": "Failed to fetch authors from OpenAlex"}), 502
 
     authors = []
@@ -107,24 +190,66 @@ def get_authors_by_topic(topic_id: str):
             "display_name": item.get("display_name"),
             "works_count": item.get("works_count"),
             "cited_by_count": item.get("cited_by_count"),
-            "last_known_institution": item.get("last_known_institution")
+            "last_known_institution": extract_institution(item.get("last_known_institution"))
         })
     return jsonify({"authors": authors})
 
 
+@app.route("/api/authors/<path:topic_id>")
+def get_authors_by_topic(topic_id: str):
+    """Return a list of authors associated with a topic."""
+    limit = request.args.get("limit", default=50, type=int)
+
+    params = {
+        "filter": f"concept.id:{topic_id}",
+        "sort": "works_count:desc",
+        "per_page": limit
+    }
+    data = fetch_openalex("/authors", params)
+    if data is None:
+        authors = OFFLINE_DATA.authors_by_topic(topic_id, limit)
+        if authors is not None:
+            return jsonify({"authors": authors})
+        return jsonify({"error": "Failed to fetch authors from OpenAlex"}), 502
+
+    authors = []
+    for item in data.get("results", []):
+        authors.append({
+            "id": item.get("id"),
+            "display_name": item.get("display_name"),
+            "works_count": item.get("works_count"),
+            "cited_by_count": item.get("cited_by_count"),
+            "last_known_institution": extract_institution(item.get("last_known_institution"))
+        })
+    return jsonify({"authors": authors})
+
+
+@app.route("/api/author/<path:author_id>")
+def get_author_profile(author_id: str):
+    """Return profile details for a single author."""
+    params = {
+        "select": "id,display_name,works_count,cited_by_count,last_known_institution"
+    }
+    data = fetch_openalex(f"/authors/{author_id}", params)
+    if data is None:
+        author = OFFLINE_DATA.author_profile(author_id)
+        if author is not None:
+            return jsonify({"author": author})
+        return jsonify({"error": "Failed to fetch author profile from OpenAlex"}), 502
+
+    author = {
+        "id": data.get("id"),
+        "display_name": data.get("display_name"),
+        "works_count": data.get("works_count"),
+        "cited_by_count": data.get("cited_by_count"),
+        "last_known_institution": extract_institution(data.get("last_known_institution"))
+    }
+    return jsonify({"author": author})
+
+
 @app.route("/api/institutions/<path:topic_id>")
 def get_institutions_by_topic(topic_id: str):
-    """Return a list of institutions associated with a topic.
-
-    Args:
-        topic_id: The OpenAlex ID of the topic.
-
-    Query parameters:
-        limit: Maximum number of institutions to return (optional, default 50).
-
-    Returns:
-        A JSON list of institutions with geo coordinates, sorted by works_count.
-    """
+    """Return a list of institutions associated with a topic."""
     limit = request.args.get("limit", default=50, type=int)
     params = {
         "filter": f"concept.id:{topic_id}",
@@ -133,46 +258,29 @@ def get_institutions_by_topic(topic_id: str):
     }
     data = fetch_openalex("/institutions", params)
     if data is None:
+        institutions = OFFLINE_DATA.institutions_by_topic(topic_id, limit)
+        if institutions is not None:
+            return jsonify({"institutions": institutions})
         return jsonify({"error": "Failed to fetch institutions from OpenAlex"}), 502
 
     institutions = []
     for item in data.get("results", []):
-        geo = item.get("geo", {}) if item else {}
+        geo = extract_geo(item.get("geo"))
         institutions.append({
             "id": item.get("id"),
             "display_name": item.get("display_name"),
             "works_count": item.get("works_count"),
             "cited_by_count": item.get("cited_by_count"),
-            "latitude": geo.get("latitude"),
-            "longitude": geo.get("longitude"),
-            "country_code": geo.get("country_code")
+            **geo
         })
     return jsonify({"institutions": institutions})
 
 
-# Route to generate a co‑authorship network for a topic
 @app.route("/api/coauthor-network/<path:topic_id>")
 def get_coauthor_network(topic_id: str):
-    """Return a co‑authorship network for works in a given topic.
-
-    This endpoint fetches a set of works associated with the topic and builds
-    a graph where each node is an author and each link represents a
-    co‑authorship between two authors. The weight of an edge corresponds to the
-    number of works that pair of authors wrote together.
-
-    Args:
-        topic_id: The OpenAlex ID of the topic.
-
-    Query parameters:
-        limit_works: Maximum number of works to process (default 200). Higher
-            values will increase processing time and may trigger rate limits.
-
-    Returns:
-        A JSON object with `nodes` and `links` lists suitable for rendering with
-        a network graph library such as react-d3-graph or react-force-graph.
-    """
+    """Return a co-authorship network for works in a given topic."""
     limit_works = request.args.get("limit_works", default=200, type=int)
-    # Select only the authorship information to reduce payload size
+    limit_works = max(1, min(limit_works, 200))
     params = {
         "filter": f"concepts.id:{topic_id}",
         "per_page": limit_works,
@@ -180,60 +288,35 @@ def get_coauthor_network(topic_id: str):
     }
     data = fetch_openalex("/works", params)
     if data is None:
+        network = OFFLINE_DATA.topic_network(topic_id)
+        if network is not None:
+            return jsonify(network)
         return jsonify({"error": "Failed to fetch works from OpenAlex"}), 502
 
-    # Build a list of works with their authors
     works = data.get("results", [])
-    # Map OpenAlex author IDs to index in node list and metadata
-    node_map = {}
-    nodes = []
-    links = {}
-
-    for work in works:
-        authorships = work.get("authorships", [])
-        # Extract authors (OpenAlex ID and display name)
-        author_ids = []
-        for auth in authorships:
-            author = auth.get("author", {})
-            author_id = author.get("id")
-            if not author_id:
-                continue
-            # Map the author ID to an index in nodes
-            if author_id not in node_map:
-                index = len(nodes)
-                node_map[author_id] = index
-                nodes.append({
-                    "id": author_id,
-                    "label": author.get("display_name", author_id)
-                })
-            author_ids.append(author_id)
-        # Generate all pairs of authors in this work
-        for i in range(len(author_ids)):
-            for j in range(i + 1, len(author_ids)):
-                a = author_ids[i]
-                b = author_ids[j]
-                # Use tuple of sorted IDs to ensure uniqueness
-                edge_key = tuple(sorted((a, b)))
-                links[edge_key] = links.get(edge_key, 0) + 1
-
-    # Convert edge dictionary to list of link objects
-    link_list = []
-    for (a, b), weight in links.items():
-        link_list.append({
-            "source": node_map[a],
-            "target": node_map[b],
-            "value": weight
-        })
-
-    return jsonify({"nodes": nodes, "links": link_list})
+    return jsonify(build_coauthor_graph(works))
 
 
-@app.route("/api/health")
-def health_check():
-    """Return a simple status message for health checks."""
-    return jsonify({"status": "ok"})
+@app.route("/api/coauthor-network/author/<path:author_id>")
+def get_author_coauthor_network(author_id: str):
+    """Return a co-authorship network centered on a specific author."""
+    limit_works = request.args.get("limit_works", default=200, type=int)
+    limit_works = max(1, min(limit_works, 200))
+    params = {
+        "filter": f"authorships.author.id:{author_id}",
+        "per_page": limit_works,
+        "select": "authorships.author"
+    }
+    data = fetch_openalex("/works", params)
+    if data is None:
+        network = OFFLINE_DATA.author_network(author_id)
+        if network is not None:
+            return jsonify(network)
+        return jsonify({"error": "Failed to fetch works from OpenAlex"}), 502
+
+    works = data.get("results", [])
+    return jsonify(build_coauthor_graph(works, focus_author_id=author_id))
 
 
 if __name__ == "__main__":
-    # Run the Flask development server on port 5000
     app.run(host="0.0.0.0", port=5000, debug=True)
